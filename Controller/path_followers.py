@@ -3,6 +3,8 @@ import random
 
 import numpy as np
 
+from .neural_follower import NeuralFollower
+
 
 def _wrap(angle):
     return (angle + math.pi) % (2 * math.pi) - math.pi
@@ -39,12 +41,16 @@ class PathFollower:
         max_speed=0.35,
         max_angular_speed=1.5,
         lookahead=0.55,
+        clearance_margin=0.15,
     ):
         self.map = occupancy_grid_map
         self.robot_radius = robot_radius
         self.max_speed = max_speed
         self.max_angular_speed = max_angular_speed
         self.lookahead = lookahead
+        if clearance_margin < 0:
+            raise ValueError("clearance_margin must be non-negative")
+        self.clearance_margin = clearance_margin
 
     def compute(self, pose, path, path_index, goal, dt):
         raise NotImplementedError
@@ -58,7 +64,12 @@ class PathFollower:
         cell = self.map.world_to_grid(x, y)
         if cell is None:
             return True
-        radius_cells = math.ceil(self.robot_radius / self.map.resolution)
+        safe_radius = (
+            self.robot_radius
+            + self.map.resolution * math.sqrt(2) / 2
+            + self.clearance_margin
+        )
+        radius_cells = math.ceil(safe_radius / self.map.resolution)
         center_x, center_y = cell
         for gy in range(center_y - radius_cells, center_y + radius_cells + 1):
             for gx in range(center_x - radius_cells, center_x + radius_cells + 1):
@@ -66,7 +77,7 @@ class PathFollower:
                     return True
                 dx = (gx - center_x) * self.map.resolution
                 dy = (gy - center_y) * self.map.resolution
-                if math.hypot(dx, dy) <= self.robot_radius and self.map.grid[gy, gx] == 1:
+                if math.hypot(dx, dy) <= safe_radius and self.map.grid[gy, gx] == 1:
                     return True
         return False
 
@@ -298,6 +309,8 @@ FOLLOWERS = {
     "mppi": MPPIFollower,
     "mpc": MPCFollower,
 }
+
+FOLLOWERS["neural"] = NeuralFollower
 
 
 def _to_robot_frame(pose, target):

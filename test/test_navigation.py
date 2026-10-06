@@ -1,15 +1,23 @@
 import math
 import unittest
+from types import SimpleNamespace
 
 from Controller.autonomous_controller import AutonomousController
 from Controller.behavior_tree import Action, Condition, NodeStatus, Selector, Sequence
 from Controller.grid_planner import GridPlanner
+from Controller.neural_follower import (
+    generate_imitation_data,
+    load_network,
+    predict_network,
+)
 from Controller.path_followers import FOLLOWERS
 from Mapping.loop_closure import LoopClosure
 from Mapping.occupancy_grid_map import OccupancyGridMap
 from Mapping.pose_graph import PoseGraph, relative_pose
 from Mapping.scan_geometry import local_scan_points, pose_in_corrected_frame
 from Mapping.scan_matcher import ScanMatcher
+from Environment.Env_V_1 import Environment
+from Geometry.world_geometry import WorldGeometry
 from Robot.differential_drive import DifferentialDriveRobot
 from Robot.odometry import NoisyOdometry
 
@@ -30,6 +38,21 @@ class GridPlannerTests(unittest.TestCase):
             occupancy_map.world_to_grid(*path[-1]),
             occupancy_map.world_to_grid(4.5, 2.5),
         )
+
+    def test_robot_radius_inflation_accounts_for_occupied_cell_area(self):
+        occupancy_map = OccupancyGridMap(width=5, height=5, resolution=0.1)
+        occupancy_map.grid[20, 20] = 1
+        planner = GridPlanner(occupancy_map, robot_radius=0.4)
+
+        path = planner.plan((1.0, 2.05), (4.0, 2.05))
+
+        self.assertTrue(path)
+        clearance = 0.4 + 0.1 * math.sqrt(2) / 2 + 0.15
+        for x, y in path:
+            self.assertGreater(
+                math.hypot(x - 2.05, y - 2.05),
+                clearance,
+            )
 
     def test_returns_empty_when_map_blocks_all_routes(self):
         occupancy_map = OccupancyGridMap(width=5, height=5, resolution=1)
@@ -126,6 +149,53 @@ class GridPlannerTests(unittest.TestCase):
 
 
 class AutonomousControllerTests(unittest.TestCase):
+    def test_follower_collision_check_uses_occupied_cell_clearance_margin(self):
+        occupancy_map = OccupancyGridMap(width=5, height=5, resolution=0.1)
+        occupancy_map.grid[20, 20] = 1
+        follower = FOLLOWERS["rpp"](occupancy_map, robot_radius=0.4)
+
+        self.assertTrue(follower._point_blocked(2.55, 2.05))
+
+    def test_default_curved_follower_clears_a_wall_corner(self):
+        occupancy_map = OccupancyGridMap(width=5, height=5, resolution=0.1)
+        occupancy_map.grid[20, 20] = 1
+        robot = DifferentialDriveRobot(x=1.0, y=2.05, theta=0.0)
+        goal = (4.0, 2.05)
+        controller = AutonomousController(robot, occupancy_map, goal=goal)
+        geometry = WorldGeometry()
+        geometry.add_rectangle(2.0, 2.0, 0.1, 0.1)
+        blocked = False
+        contacts = 0
+
+        for _ in range(800):
+            controller.update(
+                0.05,
+                pose=(robot.x, robot.y, robot.theta),
+                blocked=blocked,
+            )
+            new_x, new_y, new_theta = robot.calculate_motion(
+                controller.omega_l,
+                controller.omega_r,
+                0.05,
+            )
+            blocked = geometry.circle_collision(
+                new_x,
+                new_y,
+                robot.radius,
+            )
+            if blocked:
+                contacts += 1
+            else:
+                robot.x = new_x
+                robot.y = new_y
+            robot.theta = new_theta
+            if robot.x > 3.0 and robot.y < 2.05:
+                break
+
+        self.assertEqual(contacts, 0)
+        self.assertGreater(robot.x, 3.0)
+        self.assertLess(robot.y, 2.05)
+
     def test_generates_wheel_commands_toward_goal(self):
         occupancy_map = OccupancyGridMap(width=5, height=5, resolution=1)
         robot = DifferentialDriveRobot(x=0.5, y=0.5, theta=0)
@@ -216,12 +286,22 @@ class AutonomousControllerTests(unittest.TestCase):
         controller = AutonomousController(robot, occupancy_map, goal=(4.5, 4.5))
 
         class KeyEvent:
-            key = "f6"
+            key = "f8"
 
         controller.key_press(KeyEvent())
 
-        self.assertEqual(controller.follower_key, "mppi")
-        self.assertEqual(controller.follower_name, "MPPI")
+        self.assertEqual(controller.follower_key, "neural")
+        self.assertEqual(controller.follower_name, "Neural Imitation Follower")
+
+    def test_neural_follower_improves_on_unseen_teacher_examples(self):
+        features, labels = generate_imitation_data(
+            sample_count=512,
+            seed=103,
+        )
+        predictions = predict_network(load_network(), features)
+        validation_mse = float(((predictions - labels) ** 2).mean())
+
+        self.assertLess(validation_mse, 0.08)
 
     def test_behavior_tree_runs_goal_stop_branch(self):
         occupancy_map = OccupancyGridMap(width=5, height=5, resolution=1)
@@ -244,9 +324,93 @@ class AutonomousControllerTests(unittest.TestCase):
 
         controller.update(0.05)
 
-        self.assertEqual(controller.status, "No route; waiting for map update")
+        self.assertEqual(controller.status, "No route; backing away to search")
         self.assertEqual(controller.omega_l, 0)
         self.assertEqual(controller.omega_r, 0)
+        self.assertTrue(controller.recovery_active)
+
+    def test_behavior_tree_rotates_to_scan_then_replans_after_collision(self):
+        occupancy_map = OccupancyGridMap(width=5, height=5, resolution=1)
+        robot = DifferentialDriveRobot(x=0.5, y=0.5, theta=0)
+        controller = AutonomousController(
+            robot,
+            occupancy_map,
+            goal=(4.5, 4.5),
+            recovery_turn_rate=1.0,
+            recovery_turn_angle=0.4,
+            blocked_ticks_to_recover=2,
+        )
+        controller.update(0.05, blocked=True)
+        controller.update(0.05, blocked=True)
+
+        self.assertTrue(controller.recovery_active)
+        self.assertLess(controller.omega_l, 0)
+        self.assertGreater(controller.omega_r, 0)
+        self.assertIn("Recovery", controller.status)
+
+        for _ in range(50):
+            controller.update(0.05, blocked=False)
+
+        self.assertFalse(controller.recovery_active)
+        self.assertEqual(controller.recovery_attempts, 1)
+        self.assertEqual(controller.last_plan_scan, controller.scan_number)
+        self.assertTrue(controller.path)
+
+    def test_no_route_recovery_backs_out_of_blocked_start_then_finds_path(self):
+        occupancy_map = OccupancyGridMap(width=5, height=5, resolution=0.1)
+        occupancy_map.grid[:, :] = 0
+        occupancy_map.grid[:, 20] = 1
+        robot = DifferentialDriveRobot(x=1.7, y=2.5, theta=0.0)
+        controller = AutonomousController(
+            robot,
+            occupancy_map,
+            goal=(0.5, 2.5),
+            recovery_reverse_speed=0.2,
+            recovery_reverse_distance=0.25,
+            recovery_turn_rate=1.0,
+            recovery_turn_angle=0.1,
+            clearance_margin=0.0,
+        )
+
+        controller.update(0.05)
+        self.assertTrue(controller.recovery_active)
+
+        for _ in range(30):
+            controller.update(0.05)
+            if controller.omega_l == controller.omega_r:
+                robot.x += (
+                    robot.wheel_radius * controller.omega_l * 0.05
+                    * math.cos(robot.theta)
+                )
+                robot.y += (
+                    robot.wheel_radius * controller.omega_l * 0.05
+                    * math.sin(robot.theta)
+                )
+            else:
+                _, _, robot.theta = robot.calculate_motion(
+                    controller.omega_l,
+                    controller.omega_r,
+                    0.05,
+                )
+            controller.estimated_pose = (robot.x, robot.y, robot.theta)
+            if controller.path:
+                break
+
+        self.assertLess(robot.x, 1.5)
+        self.assertTrue(controller.path)
+        self.assertEqual(controller.status, "Navigating to goal")
+
+    def test_environment_reports_collision_blocking_motion(self):
+        env = Environment()
+        robot = DifferentialDriveRobot(x=1.59, y=3.0, theta=0.0)
+        env.robot_radius = robot.radius
+
+        blocked = env.update_motion(robot, 10.0, 10.0, 0.1)
+
+        self.assertTrue(blocked)
+        self.assertAlmostEqual(robot.x, 1.59)
+        self.assertAlmostEqual(robot.y, 3.0)
+        self.assertAlmostEqual(robot.theta, 0.0)
 
 
 class SlamTests(unittest.TestCase):
@@ -296,6 +460,23 @@ class SlamTests(unittest.TestCase):
         self.assertEqual(occupancy_map.grid[10, 20], 1)
         with self.assertRaises(ValueError):
             occupancy_map.update_from_scan(scan)
+
+    def test_ray_mapping_vectorizes_free_cells_without_erasing_obstacles(self):
+        occupancy_map = OccupancyGridMap(width=2, height=1, resolution=0.1)
+        occupancy_map.grid[2, 5] = 1
+
+        occupancy_map.update_ray(
+            robot_x=0.2,
+            robot_y=0.25,
+            robot_theta=0.0,
+            angle=0.0,
+            distance=1.0,
+            hit=True,
+        )
+
+        self.assertEqual(occupancy_map.grid[2, 3], 0)
+        self.assertEqual(occupancy_map.grid[2, 5], 1)
+        self.assertEqual(occupancy_map.grid[2, 11], 1)
 
     def test_scan_deskew_uses_odometry_not_hidden_simulator_pose(self):
         scan = [

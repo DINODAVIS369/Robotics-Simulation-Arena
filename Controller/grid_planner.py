@@ -20,10 +20,14 @@ class GridPlanner:
         robot_radius,
         unknown_cost=2.0,
         algorithm="astar",
+        clearance_margin=0.15,
     ):
         self.map = occupancy_grid_map
         self.robot_radius = robot_radius
         self.unknown_cost = unknown_cost
+        if clearance_margin < 0:
+            raise ValueError("clearance_margin must be non-negative")
+        self.clearance_margin = clearance_margin
         self.algorithm = self._validate_algorithm(algorithm)
 
     @property
@@ -55,14 +59,25 @@ class GridPlanner:
 
     def _blocked_cells(self):
         occupied = self.map.grid == 1
+        # Occupancy values represent whole cells, not point obstacles.
+        # Include a half-cell diagonal so the robot's footprint clears
+        # the cell boundary even when the cell center is discretized.
+        inflation_radius = (
+            self.robot_radius
+            + self.map.resolution * math.sqrt(2) / 2
+            + self.clearance_margin
+        )
         inflation_cells = math.ceil(
-            self.robot_radius / self.map.resolution
+            inflation_radius / self.map.resolution
         )
         blocked = occupied.copy()
 
         for offset_y in range(-inflation_cells, inflation_cells + 1):
             for offset_x in range(-inflation_cells, inflation_cells + 1):
-                if math.hypot(offset_x, offset_y) * self.map.resolution > self.robot_radius:
+                if (
+                    math.hypot(offset_x, offset_y) * self.map.resolution
+                    > inflation_radius
+                ):
                     continue
 
                 source_y_start = max(0, -offset_y)

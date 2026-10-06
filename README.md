@@ -11,11 +11,13 @@ The simulation uses Matplotlib to visualize a robot moving around a bounded map 
 - Keyboard control with WASD keys
 - LiDAR ray casting and point-cloud updates
 - LiDAR-based occupancy-grid mapping
+- Vectorized occupancy-grid ray updates to reduce CPU work during scans
 - Noisy wheel-odometry pose estimation
 - Correlative LiDAR scan matching
 - Keyframe loop closure with pose-graph optimization
 - Selectable A*, Dijkstra, Greedy Best-First, and Theta* grid planning
-- Selectable RPP, Pure Pursuit, Stanley, PID, DWB, MPPI, and MPC path following
+- Selectable RPP, Pure Pursuit, Stanley, PID, DWB, MPPI, MPC, and neural imitation path following
+- Robot-radius obstacle inflation with additional clearance for cell resolution and curved tracking
 - Behavior-tree navigation flow for goal check, planning, following, and recovery
 - Live planned-route overlay and goal marker in the world view
 - Real-time visualization in a Matplotlib window
@@ -133,6 +135,7 @@ The robot starts in autonomous mode. Press `G` to switch between autonomous and 
 - `F5` — DWB (Dynamic Window approach)
 - `F6` — MPPI (Model Predictive Path Integral)
 - `F7` — MPC (Model Predictive Control)
+- `F8` — neural imitation follower (small NumPy network trained to copy RPP)
 - `G` — switch autonomous/manual mode
 - `W` — move forward
 - `S` — move backward
@@ -140,7 +143,7 @@ The robot starts in autonomous mode. Press `G` to switch between autonomous and 
 - `D` — rotate right
 - `Space` — stop
 
-Number keys `1`-`4` select the path planner; `F1`-`F7` select the path follower. Selections can be changed while driving autonomously. The current planner and follower are shown in the simulation title, and the route is replanned/redrawn after planner selection. The behavior tree checks for goal completion, ensures a route exists, follows it, and stops safely while waiting for a map update if no route is available. The robot cannot drive through walls or obstacles because each attempted motion is checked against the world geometry before updating the pose. The default autonomous goal is `(3, 9)`; change the `goal` argument in `main.py` to select another destination.
+Number keys `1`-`4` select the path planner; `F1`-`F8` select the path follower. Selections can be changed while driving autonomously. The current planner and follower are shown in the simulation title, and the route is replanned/redrawn after planner selection. The behavior tree checks for goal completion, ensures a route exists, follows it, and recovers from repeated collision-blocked movement: it backs away from the obstacle, turns in place so the rotating LiDAR can scan, and replans using the updated map. If the start remains blocked or no route is known, it repeats recovery with a longer retreat up to the configured attempt limit, then stops safely and waits for another scan. The robot cannot drive through walls or obstacles because each attempted motion is checked against the world geometry before updating the pose. The default autonomous goal is `(3, 9)`; change the `goal` argument in `main.py` to select another destination.
 
 In the environment window, the A* route is drawn as an orange dashed line and
 the goal is shown as a gold star. The route updates when the planner replans.
@@ -151,8 +154,8 @@ This project does **not** install or run ROS 2 or Nav2. It implements comparable
 algorithm families directly in Python:
 
 - A*, Dijkstra, Greedy Best-First, and Theta* occupancy-grid planning
-- Regulated Pure Pursuit, Pure Pursuit, Stanley, PID, DWB, MPPI, and MPC
-  path following/control
+- Regulated Pure Pursuit, Pure Pursuit, Stanley, PID, DWB, MPPI, MPC, and an
+  imitation-trained neural path follower
 - A lightweight Python behavior tree for sequencing navigation tasks
 - LiDAR scan matching and keyframe pose-graph loop closure, following concepts
   used by pose-graph SLAM systems such as SLAM Toolbox
@@ -160,6 +163,21 @@ algorithm families directly in Python:
 These are independent educational Python implementations, not the ROS packages'
 source code or bit-for-bit equivalents. The project has no ROS nodes, topics,
 TF tree, lifecycle management, plugin interfaces, or ROS message transport.
+
+## Neural follower study
+
+The F8 controller is a small NumPy neural network trained to imitate the RPP
+controller; it is an experiment in supervised learning, not a replacement for
+SLAM or the path planner. To retrain the included model using the active system
+Python and installed libraries, run:
+
+```bash
+uv run --no-project --python "$(command -v python3)" train_neural_follower.py
+```
+
+Training prints training and validation loss and saves the weights in
+`Controller/neural_follower_weights.json`. See the neural follower section in
+`LEARNING_GUIDE.md` for the inputs, outputs, and learning math.
 
 ## How it works
 
@@ -172,8 +190,8 @@ TF tree, lifecycle management, plugin interfaces, or ROS message transport.
 7. The map integrates LiDAR rays at the estimated pose, not the simulator's hidden physical pose.
 8. Loop closure checks for revisited keyframes and adds a constraint to the pose graph; Gauss-Newton optimization adjusts the trajectory before rebuilding the map.
 9. The selected A*, Dijkstra, Greedy Best-First, or Theta* planner searches the map, with a higher cost for unexplored cells and obstacle inflation for the robot's radius.
-10. The selected RPP, Pure Pursuit, Stanley, PID, DWB, MPPI, or MPC controller converts the route and estimated pose into wheel commands.
-11. A behavior tree sequences goal checking, path availability, route following, and safe stopping/recovery.
+10. The selected path follower converts the route and estimated pose into wheel commands. The F8 neural follower is a small NumPy network trained to imitate RPP.
+11. A behavior tree sequences goal checking, path availability, route following, and collision recovery. Repeatedly blocked movement or a blocked start cell triggers a retreat, LiDAR scan turn, and route replanning.
 
 This is a self-contained educational 2D SLAM and navigation implementation. It uses noisy wheel odometry, odometry-based scan deskewing, occupancy-grid scan matching, keyframe revisit detection, and nonlinear pose-graph optimization. It is not a production-grade SLAM system: loop closure and scan matching are simplified, and it lacks robust data association, sensor calibration, and the extensive recovery behaviors of a mature navigation stack.
 

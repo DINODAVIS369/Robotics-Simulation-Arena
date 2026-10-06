@@ -74,7 +74,7 @@ class SimulationEngine:
         # 1. Move the robot.
         left_command = self.controller.omega_l
         right_command = self.controller.omega_r
-        self.env.update_motion(
+        movement_blocked = self.env.update_motion(
             self.robot,
             left_command,
             right_command,
@@ -178,7 +178,11 @@ class SimulationEngine:
 
         if hasattr(self.controller, "update"):
             if hasattr(self.controller, "estimated_pose"):
-                self.controller.update(self.dt, pose=self.odometry.pose)
+                self.controller.update(
+                    self.dt,
+                    pose=self.odometry.pose,
+                    blocked=movement_blocked,
+                )
             else:
                 self.controller.update(self.dt)
         self._update_path_visualization()

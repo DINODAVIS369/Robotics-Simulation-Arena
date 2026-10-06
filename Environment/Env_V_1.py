@@ -1,4 +1,6 @@
 
+import math
+
 import matplotlib.pyplot as plt
 
 from Geometry.world_geometry import WorldGeometry
@@ -81,13 +83,19 @@ class Environment:
             dt
         )
 
-        if not self.collision(new_x, new_y):
+        movement_blocked = (
+            math.hypot(new_x - robot.x, new_y - robot.y) > 1e-9
+            and self.collision(new_x, new_y)
+        )
+
+        if not movement_blocked:
 
             robot.x = new_x
             robot.y = new_y
 
         # Update heading even if translation is blocked.
         robot.theta = new_theta
+        return movement_blocked
 
     def show(self):
         plt.show()

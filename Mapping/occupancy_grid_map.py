@@ -223,35 +223,37 @@ class OccupancyGridMap:
             self.resolution / 2
         )
 
-        current_distance = 0.0
-
-        # =====================================================
-        # TRACE RAY THROUGH THE ENVIRONMENT
-        # =====================================================
-
-        while current_distance < distance:
-
-            x = (
+        ray_distances = np.arange(
+            0.0,
+            distance,
+            step,
+        )
+        grid_x = (
+            (
                 robot_x
-                + direction_x
-                * current_distance
+                + direction_x * ray_distances
             )
-
-            y = (
+            / self.resolution
+        ).astype(int)
+        grid_y = (
+            (
                 robot_y
-                + direction_y
-                * current_distance
+                + direction_y * ray_distances
             )
+            / self.resolution
+        ).astype(int)
+        inside = (
+            (grid_x >= 0)
+            & (grid_x < self.grid_width)
+            & (grid_y >= 0)
+            & (grid_y < self.grid_height)
+        )
+        grid_x = grid_x[inside]
+        grid_y = grid_y[inside]
 
-            # Mark everything between the
-            # robot and obstacle as free.
-
-            self.mark_free(
-                x,
-                y
-            )
-
-            current_distance += step
+        # Preserve occupied cells when clearing cells along a free ray.
+        free_cells = self.grid[grid_y, grid_x] != 1
+        self.grid[grid_y[free_cells], grid_x[free_cells]] = 0
 
         # =====================================================
         # OBSTACLE DETECTED

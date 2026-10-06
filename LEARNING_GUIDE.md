@@ -225,11 +225,16 @@ the code is:
 h = max(dx, dy) + (sqrt(2) - 1)*min(dx, dy)
 ```
 
-Occupied cells are blocked. Obstacles are expanded by the robot's radius so a
-route leaves enough room for the circular robot. Unknown cells can be crossed,
-but have an extra cost so a route through already-observed free space is
-preferred when available. Diagonal moves are rejected if either neighboring
-side cell is blocked, preventing corner-cutting through walls.
+Occupied cells are blocked. The planner inflates obstacles by the robot's
+radius, half a cell diagonal (to account for occupied cells having area), and
+an extra 0.15 m tracking-clearance margin. The path followers use the same
+clearance when checking predicted motion. This extra margin helps keep curved
+tracking away from wall corners; reduce `clearance_margin` in
+`AutonomousController` only if a narrow passage becomes unreachable. Unknown
+cells can be crossed, but have an extra cost so a route through
+already-observed free space is preferred when available. Diagonal moves are
+rejected if either neighboring side cell is blocked, preventing
+corner-cutting through walls.
 
 The controller replans when a new LiDAR scan has been added to the map.
 Press `1`, `2`, `3`, or `4` to select A*, Dijkstra, Greedy Best-First, or
@@ -241,7 +246,7 @@ Source: `Controller/grid_planner.py`.
 
 The path planner answers “which route should the robot take?” A path follower
 or local controller answers “which wheel velocities should it use now?”
-Press `F1`-`F7` to select one of these Python implementations:
+Press `F1`-`F8` to select one of these Python implementations:
 
 - **Regulated Pure Pursuit (F1):** geometric lookahead steering with speed
   reduced for curvature and distance to the goal.
@@ -256,6 +261,8 @@ Press `F1`-`F7` to select one of these Python implementations:
   averaging to choose the next velocity.
 - **MPC (F7):** searches a short horizon of candidate control sequences and
   applies the first command from the best predicted sequence.
+- **Neural imitation (F8):** a small feed-forward network learns to copy RPP's
+  speed and turn commands from synthetic examples.
 
 The DWB, MPPI, and MPC implementations here are intentionally compact
 educational versions; they do not reproduce every Nav2 critic, optimizer, or
@@ -305,6 +312,47 @@ rotate-to-heading, or collision projection.
 
 Source: `Controller/autonomous_controller.py`.
 
+## Neural follower study
+
+The F8 follower is a study example of **supervised imitation learning**. It
+does not learn SLAM or path planning. The existing planner still supplies the
+route; the network learns to imitate how Regulated Pure Pursuit follows it.
+
+The network has three inputs, one 16-neuron `tanh` hidden layer, and two
+`tanh` outputs:
+
+```text
+inputs = [lookahead_x, lookahead_y, goal_distance]
+outputs = [normalized_forward_speed, normalized_turn_rate]
+```
+
+The lookahead coordinates are transformed into the robot's local frame and
+normalized. Training data is generated from randomized lookahead points and
+goal distances. For every example, the RPP equations produce target commands
+(the labels). Full-batch gradient descent adjusts the weights to reduce mean
+squared error:
+
+```text
+loss = mean((network(inputs) - RPP_teacher_commands)**2)
+```
+
+The included weights are a trained example model. To retrain them using your
+active system Python and its installed NumPy through `uv`, run this from the
+project directory:
+
+```bash
+uv run --no-project --python "$(command -v python3)" train_neural_follower.py
+```
+
+The script prints training and held-out validation losses, then writes the
+weights to `Controller/neural_follower_weights.json`. Use `--samples`, `--epochs`,
+and `--seed` to experiment reproducibly. Compare F8 with F1 on the same route.
+This is a small educational model, not a safety-certified controller; the
+planner and physical collision/recovery logic remain responsible for route
+planning and wall collisions.
+
+Source: `Controller/neural_follower.py` and `train_neural_follower.py`.
+
 The world visualization draws the complete A* route as an orange dashed line
 and marks the goal with a gold star. The route line is updated when the
 controller calculates a new path.
@@ -339,13 +387,24 @@ than a single long chain of conditions. A **Sequence** succeeds only when each
 child succeeds; a **Selector** tries children until one succeeds or remains
 running. Nodes return `SUCCESS`, `FAILURE`, or `RUNNING`.
 
-The navigation tree has three branches:
+The navigation tree has four branches:
 
 1. If the goal is reached, stop the wheels and report success.
-2. If a route is available, run the selected follower. Following returns
+2. If motion is repeatedly blocked by collision, back away from the obstacle,
+   then rotate in place so the LiDAR can scan the surroundings. Once the scan
+   turn completes, replan from the updated map.
+3. If a route is available, run the selected follower. Following returns
    `RUNNING` because navigation continues over many simulation updates.
-3. If no route is available, stop and wait for new map data before planning
+4. If no route is available, stop and wait for new map data before planning
    again.
+
+The environment reports when it rejects a commanded translation due to a
+collision. The tree requires several consecutive blocked updates to avoid
+treating one brief contact as a persistent obstacle. If planning fails because
+the current start cell is inside the robot-radius-inflated obstacle area, the
+tree also tries retreat-and-scan recovery. Each retry backs away farther,
+within a configured limit, then replans using only the occupancy grid. Recovery
+does not inspect hidden world geometry to find a route.
 
 This is a small Python behavior-tree implementation inspired by the task
 sequencing style used in Nav2. It does not use Nav2's BT Navigator, XML trees,
