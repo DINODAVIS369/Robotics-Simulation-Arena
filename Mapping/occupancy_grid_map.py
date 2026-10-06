@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from matplotlib.colors import ListedColormap, BoundaryNorm
+from Mapping.scan_geometry import pose_in_corrected_frame
 
 
 class OccupancyGridMap:
@@ -283,8 +284,18 @@ class OccupancyGridMap:
 
     def update_from_scan(
         self,
-        scan_data
+        scan_data,
+        pose=None,
     ):
+
+        reference_pose = next(
+            (
+                item.get("odometry_pose")
+                for item in scan_data
+                if item.get("odometry_pose") is not None
+            ),
+            pose,
+        )
 
         # Process every LiDAR measurement.
 
@@ -310,17 +321,28 @@ class OccupancyGridMap:
             # ROBOT POSE AT MEASUREMENT TIME
             # =================================================
 
-            robot_x = measurement[
-                "robot_x"
-            ]
+            beam_pose = measurement.get("odometry_pose")
+            if pose is None:
+                try:
+                    beam_pose = (
+                        measurement["robot_x"],
+                        measurement["robot_y"],
+                        measurement["robot_theta"],
+                    )
+                except KeyError as error:
+                    raise ValueError(
+                        "A robot pose is required to map scans without pose metadata"
+                    ) from error
+            elif beam_pose is not None:
+                beam_pose = pose_in_corrected_frame(
+                    reference_pose,
+                    pose,
+                    beam_pose,
+                )
+            else:
+                beam_pose = pose
 
-            robot_y = measurement[
-                "robot_y"
-            ]
-
-            robot_theta = measurement[
-                "robot_theta"
-            ]
+            robot_x, robot_y, robot_theta = beam_pose
 
             # =================================================
             # UPDATE THIS RAY
@@ -334,6 +356,9 @@ class OccupancyGridMap:
                 distance,
                 hit
             )
+
+    def clear(self):
+        self.grid.fill(-1)
 
     # =========================================================
     # CREATE MAP VISUALIZATION

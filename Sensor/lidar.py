@@ -408,7 +408,8 @@ class Lidar:
     def update(
         self,
         robot,
-        dt
+        dt,
+        odometry_pose=None,
     ):
 
         # -----------------------------------------------------
@@ -482,12 +483,7 @@ class Lidar:
                     "hit":
                         self.current_hit,
 
-                    "point":
-                        self.hit_point,
-
-                    "robot_x": robot.x,
-                    "robot_y": robot.y,
-                    "robot_theta": robot.theta
+                    "odometry_pose": odometry_pose,
                 }
             )
 
